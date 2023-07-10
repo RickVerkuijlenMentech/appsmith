@@ -1,18 +1,25 @@
 import React from "react";
 import styled from "styled-components";
+import { createNewApiName } from "utils/AppsmithUtils";
 import { DATASOURCE_REST_API_FORM } from "@appsmith/constants/forms";
+import FormTitle from "./FormTitle";
 import type { Datasource } from "entities/Datasource";
 import type { InjectedFormProps } from "redux-form";
-import { getFormMeta, reduxForm } from "redux-form";
+import { getFormMeta, getFormValues, reduxForm } from "redux-form";
 import AnalyticsUtil from "utils/AnalyticsUtil";
 import FormControl from "pages/Editor/FormControl";
 import { StyledInfo } from "components/formControls/InputTextControl";
 import { connect } from "react-redux";
 import type { AppState } from "@appsmith/reducers";
+import type { ApiActionConfig } from "entities/Action";
 import { PluginType } from "entities/Action";
-import { Button, Callout } from "design-system";
+import type { ActionDataState } from "reducers/entityReducers/actionsReducer";
+import { Button, Callout, Category, Toaster, Variant } from "design-system-old";
+import { DEFAULT_API_ACTION_CONFIG } from "constants/ApiEditorConstants/ApiEditorConstants";
+import { createActionRequest } from "actions/pluginActionActions";
 import {
   createDatasourceFromForm,
+  deleteDatasource,
   redirectAuthorizationCode,
   toggleSaveActionFlag,
   updateDatasource,
@@ -22,26 +29,41 @@ import {
   datasourceToFormValues,
   formValuesToDatasource,
 } from "transformers/RestAPIDatasourceFormTransformer";
-import type {
-  ApiDatasourceForm,
-  AuthorizationCode,
-  ClientCredentials,
-} from "entities/Datasource/RestAPIForm";
+import type { ApiDatasourceForm } from "entities/Datasource/RestAPIForm";
 import {
   ApiKeyAuthType,
   AuthType,
   GrantType,
+  SSLType,
 } from "entities/Datasource/RestAPIForm";
 import { createMessage, INVALID_URL } from "@appsmith/constants/messages";
 import Collapsible from "./Collapsible";
 import _ from "lodash";
 import FormLabel from "components/editorComponents/FormLabel";
 import CopyToClipBoard from "components/designSystems/appsmith/CopyToClipBoard";
+import CloseEditor from "components/editorComponents/CloseEditor";
 import { updateReplayEntity } from "actions/pageActions";
 import { ENTITY_TYPE } from "entities/AppsmithConsole";
+import {
+  FormContainer,
+  FormContainerBody,
+  FormTitleContainer,
+  Header,
+  PluginImage,
+} from "./JSONtoForm";
+import DatasourceAuth, {
+  DatasourceButtonType,
+} from "pages/common/datasourceAuth";
 import { TEMP_DATASOURCE_ID } from "constants/Datasource";
 import { hasManageDatasourcePermission } from "@appsmith/utils/permissionHelpers";
-import { Form } from "./DBForm";
+import { getPlugin } from "../../../selectors/entitiesSelector";
+import type { Plugin } from "api/PluginApi";
+import Debugger, {
+  ResizerContentContainer,
+  ResizerMainContainer,
+} from "./Debugger";
+import { getAssetUrl } from "@appsmith/utils/airgapHelpers";
+import { showDebuggerFlag } from "selectors/debuggerSelectors";
 
 interface DatasourceRestApiEditorProps {
   initializeReplayEntity: (id: string, data: any) => void;
@@ -49,28 +71,35 @@ interface DatasourceRestApiEditorProps {
     formValues: Datasource,
     onSuccess?: ReduxAction<unknown>,
   ) => void;
+  deleteDatasource: (id: string) => void;
   isSaving: boolean;
+  isDeleting: boolean;
   applicationId: string;
   datasourceId: string;
   pageId: string;
+  isNewDatasource: boolean;
+  pluginImage: string;
   location: {
     search: string;
   };
   datasource: Datasource;
+  plugin: Plugin | undefined;
   formData: ApiDatasourceForm;
-  formName: string;
-  pluginName: string;
-  pluginPackageName: string;
+  actions: ActionDataState;
   formMeta: any;
   messages?: Array<string>;
+  hiddenHeader?: boolean;
+  showDebugger: boolean;
+  responseStatus?: string;
+  responseMessage?: string;
   datasourceName: string;
-  showFilterComponent: boolean;
   createDatasource: (
     data: Datasource,
     onSuccess?: ReduxAction<unknown>,
   ) => void;
   toggleSaveActionFlag: (flag: boolean) => void;
   triggerSave?: boolean;
+  isFormDirty: boolean;
   datasourceDeleteTrigger: () => void;
 }
 
@@ -80,13 +109,30 @@ type Props = DatasourceRestApiEditorProps &
 const FormInputContainer = styled.div`
   margin-top: 16px;
   .t--save-and-authorize-datasource {
-    margin-left: 0;
+    margin-left: 20px;
   }
 `;
 
-class DatasourceRestAPIEditor extends React.Component<Props> {
+const StyledButton = styled(Button)`
+  &&&& {
+    width: 87px;
+    height: 32px;
+  }
+`;
+
+const AuthorizeButton = styled(StyledButton)`
+  &&&& {
+    width: 180px;
+  }
+`;
+
+class DatasourceRestAPIEditor extends React.Component<
+  Props,
+  { confirmDelete: boolean }
+> {
   constructor(props: Props) {
     super(props);
+    this.state = { confirmDelete: false };
   }
   componentDidMount() {
     // set replay data
@@ -98,6 +144,14 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
 
   componentDidUpdate(prevProps: Props) {
     if (!this.props.formData) return;
+
+    if (this.state.confirmDelete) {
+      const delayConfirmDeleteToFalse = _.debounce(() => {
+        if (!this.props.isDeleting) this.setState({ confirmDelete: false });
+      }, 2200);
+
+      delayConfirmDeleteToFalse();
+    }
 
     const { authType } = this.props.formData;
 
@@ -176,7 +230,7 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
     if (_.get(authentication, "grantType") === GrantType.AuthorizationCode) {
       if (
         _.get(authentication, "refreshTokenClientCredentialsLocation") ===
-          undefined ||
+        undefined ||
         _.get(authentication, "refreshTokenClientCredentialsLocation") === ""
       ) {
         this.props.change(
@@ -207,8 +261,8 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
     AnalyticsUtil.logEvent("SAVE_DATA_SOURCE_CLICK", {
       pageId: this.props.pageId,
       appId: this.props.applicationId,
-      pluginName: this.props.pluginName || "",
-      pluginPackageName: this.props.pluginPackageName || "",
+      pluginName: this.props?.plugin?.name || "",
+      pluginPackageName: this?.props?.plugin?.packageName || "",
     });
 
     if (this.props.datasource.id !== TEMP_DATASOURCE_ID) {
@@ -224,6 +278,50 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
     );
   };
 
+  createApiAction = () => {
+    const { actions, datasource, pageId } = this.props;
+    if (
+      !datasource ||
+      !datasource.datasourceConfiguration ||
+      !datasource.datasourceConfiguration.url
+    ) {
+      Toaster.show({
+        text: "Unable to create API. Try adding a url to the datasource",
+        variant: Variant.danger,
+      });
+      return;
+    }
+    const newApiName = createNewApiName(actions, pageId || "");
+
+    const headers =
+      this.props.datasource?.datasourceConfiguration?.headers ?? [];
+    const queryParameters =
+      this.props.datasource?.datasourceConfiguration?.queryParameters ?? [];
+    const defaultApiActionConfig: ApiActionConfig = {
+      ...DEFAULT_API_ACTION_CONFIG,
+      headers: headers.length ? headers : DEFAULT_API_ACTION_CONFIG.headers,
+      queryParameters: queryParameters.length
+        ? queryParameters
+        : DEFAULT_API_ACTION_CONFIG.queryParameters,
+    };
+
+    this.save(
+      createActionRequest({
+        name: newApiName,
+        pageId: pageId,
+        pluginId: datasource.pluginId,
+        datasource: {
+          id: datasource.id,
+        },
+        eventData: {
+          actionType: "API",
+          from: "datasource-pane",
+        },
+        actionConfiguration: defaultApiActionConfig,
+      }),
+    );
+  };
+
   urlValidator = (value: string) => {
     const validationRegex = "^(http|https)://";
     if (value) {
@@ -232,25 +330,77 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
       return regex.test(value)
         ? { isValid: true, message: "" }
         : {
-            isValid: false,
-            message: createMessage(INVALID_URL),
-          };
+          isValid: false,
+          message: createMessage(INVALID_URL),
+        };
     }
 
     return { isValid: true, message: "" };
   };
 
   render = () => {
+    const { datasource, formData, hiddenHeader, pageId, showDebugger } =
+      this.props;
     return (
-      <Form
-        onSubmit={(e) => {
-          e.preventDefault();
-        }}
-        showFilterComponent={this.props.showFilterComponent}
-      >
-        {this.renderEditor()}
-      </Form>
+      <FormContainer>
+        {/* this is true during import flow */}
+        {!hiddenHeader && <CloseEditor />}
+        <FormContainerBody>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+            }}
+          >
+            {this.renderHeader()}
+            <ResizerMainContainer>
+              <ResizerContentContainer className="api-datasource-content-container">
+                {this.renderEditor()}
+                <DatasourceAuth
+                  datasource={datasource}
+                  datasourceButtonConfiguration={[
+                    DatasourceButtonType.DELETE,
+                    DatasourceButtonType.SAVE,
+                  ]}
+                  datasourceDeleteTrigger={this.props.datasourceDeleteTrigger}
+                  formData={formData}
+                  getSanitizedFormData={this.getSanitizedFormData}
+                  isFormDirty={this.props.isFormDirty}
+                  isInvalid={this.validate()}
+                  pageId={pageId}
+                  shouldRender
+                />
+              </ResizerContentContainer>
+              {showDebugger && <Debugger />}
+            </ResizerMainContainer>
+          </form>
+        </FormContainerBody>
+      </FormContainer>
     );
+  };
+
+  renderHeader = () => {
+    const {
+      datasource,
+      datasourceId,
+      hiddenHeader,
+      isNewDatasource,
+      pluginImage,
+    } = this.props;
+    const createMode = datasourceId === TEMP_DATASOURCE_ID;
+    const canManageDatasource = hasManageDatasourcePermission(
+      datasource?.userPermissions || [],
+    );
+    return !hiddenHeader ? (
+      <Header>
+        <FormTitleContainer>
+          <PluginImage alt="Datasource" src={getAssetUrl(pluginImage)} />
+          <FormTitle
+            disabled={!createMode && !canManageDatasource}
+            focusOnMount={isNewDatasource}
+          />
+        </FormTitleContainer>
+      </Header>
+    ) : null;
   };
 
   renderEditor = () => {
@@ -269,20 +419,21 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
       <>
         {messages &&
           messages.map((msg, i) => (
-            <Callout key={i} kind="warning">
-              {msg}
-            </Callout>
+            <Callout fill key={i} text={msg} variant={Variant.warning} />
           ))}
         {this.renderGeneralSettings()}
+        {this.renderAuthFields()}
         {this.renderOauth2AdvancedSettings()}
+        {this.renderSelfSignedCertificateFields()}
         {formData.authType &&
           formData.authType === AuthType.OAuth2 &&
           _.get(authentication, "grantType") ===
-            GrantType.AuthorizationCode && (
+          GrantType.AuthorizationCode && (
             <FormInputContainer>
-              <Button
+              <AuthorizeButton
+                category={Category.primary}
                 className="t--save-and-authorize-datasource"
-                isDisabled={this.validate()}
+                disabled={this.validate()}
                 isLoading={isSaving}
                 onClick={() =>
                   this.save(
@@ -293,9 +444,12 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
                     ),
                   )
                 }
-              >
-                {isAuthorized ? "Save and Re-Authorize" : "Save and Authorize"}
-              </Button>
+                tag="button"
+                text={
+                  isAuthorized ? "Save and Re-Authorize" : "Save and Authorize"
+                }
+                variant={Variant.success}
+              />
             </FormInputContainer>
           )}
       </>
@@ -308,8 +462,8 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
     return (
       <section
         className="t--section-general"
+        data-cy="section-General"
         data-replay-id="section-General"
-        data-testid="section-General"
       >
         <FormInputContainer data-replay-id={btoa("url")}>
           {this.renderInputTextControlViaFormControl({
@@ -322,19 +476,49 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
             fieldValidator: this.urlValidator,
           })}
         </FormInputContainer>
+        <FormInputContainer
+          className="t--headers-array"
+          data-replay-id={btoa("headers")}
+        >
+          {this.renderKeyValueControlViaFormControl(
+            "headers",
+            "Headers",
+            "",
+            false,
+          )}
+        </FormInputContainer>
+        <FormInputContainer data-replay-id={btoa("queryParameters")}>
+          {this.renderKeyValueControlViaFormControl(
+            "queryParameters",
+            "Query Parameters",
+            "",
+            false,
+          )}
+        </FormInputContainer>
         <FormInputContainer data-replay-id={btoa("isSendSessionEnabled")}>
-          {this.renderCheckboxViaFormControl(
+          {this.renderDropdownControlViaFormControl(
             "isSendSessionEnabled",
+            [
+              {
+                label: "Yes",
+                value: true,
+              },
+              {
+                label: "No",
+                value: false,
+              },
+            ],
             "Send Appsmith signature header",
             "",
             true,
+            "Header key: X-APPSMITH-SIGNATURE",
           )}
         </FormInputContainer>
         {formData.isSendSessionEnabled && (
           <FormInputContainer data-replay-id={btoa("sessionSignatureKey")}>
             {this.renderInputTextControlViaFormControl({
               configProperty: "sessionSignatureKey",
-              label: "Session details signature key",
+              label: "Session Details Signature Key",
               placeholderText: "",
               dataType: "TEXT",
               encrypted: false,
@@ -342,76 +526,50 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
             })}
           </FormInputContainer>
         )}
-        <FormInputContainer data-replay-id={btoa("ssl")}>
-          {this.renderCheckboxViaFormControl(
-            "connection.ssl.authTypeControl",
-            "Use Self-Signed Certificate",
+        <FormInputContainer data-replay-id={btoa("authType")}>
+          {this.renderDropdownControlViaFormControl(
+            "authType",
+            [
+              {
+                label: "None",
+                value: AuthType.NONE,
+              },
+              {
+                label: "Basic",
+                value: AuthType.basic,
+              },
+              {
+                label: "OAuth 2.0",
+                value: AuthType.OAuth2,
+              },
+              {
+                label: "API Key",
+                value: AuthType.apiKey,
+              },
+              {
+                label: "Bearer Token",
+                value: AuthType.bearerToken,
+              },
+              {
+                label: "AWS Signature V4",
+                value: AuthType.awsV4,
+              },
+            ],
+            "Authentication Type",
             "",
-            true,
+            false,
+            "",
           )}
         </FormInputContainer>
-        {this.renderSelfSignedCertificateFields()}
-        <Collapsible title="Headers">
-          <FormInputContainer
-            className="t--headers-array"
-            data-replay-id={btoa("headers")}
-          >
-            {this.renderKeyValueControlViaFormControl("headers", "", "", false)}
-          </FormInputContainer>
-        </Collapsible>
-        <Collapsible title="Query parameters">
-          <FormInputContainer data-replay-id={btoa("queryParameters")}>
-            {this.renderKeyValueControlViaFormControl(
-              "queryParameters",
-              "",
-              "",
-              false,
-            )}
-          </FormInputContainer>
-        </Collapsible>
-        <Collapsible title="Authentication">
-          <FormInputContainer data-replay-id={btoa("authType")}>
-            {this.renderDropdownControlViaFormControl(
-              "authType",
-              [
-                {
-                  label: "None",
-                  value: AuthType.NONE,
-                },
-                {
-                  label: "Basic",
-                  value: AuthType.basic,
-                },
-                {
-                  label: "OAuth 2.0",
-                  value: AuthType.OAuth2,
-                },
-                {
-                  label: "API key",
-                  value: AuthType.apiKey,
-                },
-                {
-                  label: "Bearer token",
-                  value: AuthType.bearerToken,
-                },
-              ],
-              "Authentication type",
-              "",
-              false,
-              "",
-            )}
-            {this.renderAuthFields()}
-          </FormInputContainer>
-        </Collapsible>
       </section>
     );
   };
 
   renderSelfSignedCertificateFields = () => {
     const { connection } = this.props.formData;
-    if (connection?.ssl.authTypeControl) {
+    if (connection?.ssl.authType === SSLType.SELF_SIGNED_CERTIFICATE) {
       return (
-        <div style={{ marginTop: "16px" }}>
+        <Collapsible defaultIsOpen title="Certificate Details">
           {this.renderFilePickerControlViaFormControl(
             "connection.ssl.certificateFile",
             "Upload Certificate",
@@ -419,7 +577,7 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
             false,
             true,
           )}
-        </div>
+        </Collapsible>
       );
     }
   };
@@ -436,9 +594,15 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
       content = this.renderApiKey();
     } else if (authType === AuthType.bearerToken) {
       content = this.renderBearerToken();
+    } else if (authType === AuthType.awsV4) {
+      content = this.renderAwsSignature();
     }
     if (content) {
-      return content;
+      return (
+        <Collapsible defaultIsOpen title="Authentication">
+          {content}
+        </Collapsible>
+      );
     }
   };
 
@@ -491,7 +655,7 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
           >
             {this.renderInputTextControlViaFormControl({
               configProperty: "authentication.headerPrefix",
-              label: "Header prefix",
+              label: "Header Prefix",
               placeholderText: "eg: Bearer ",
               dataType: "TEXT",
               encrypted: false,
@@ -508,13 +672,72 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
       <FormInputContainer data-replay-id={btoa("authentication.bearerToken")}>
         {this.renderInputTextControlViaFormControl({
           configProperty: "authentication.bearerToken",
-          label: "Bearer token",
-          placeholderText: "Bearer token",
+          label: "Bearer Token",
+          placeholderText: "Bearer Token",
           dataType: "TEXT",
           encrypted: true,
           isRequired: false,
         })}
       </FormInputContainer>
+    );
+  };
+
+  renderAwsSignature = () => {
+    return (
+      <>
+        <FormInputContainer
+          data-replayid={btoa("authentication.awsSignatureV4")}
+        >
+          {this.renderInputTextControlViaFormControl({
+            configProperty: "authentication.accessKeyId",
+            label: "AWS Access Key ID",
+            placeholderText: "Access Key Id",
+            dataType: "TEXT",
+            encrypted: true,
+            isRequired: false,
+          })}
+        </FormInputContainer>
+        <FormInputContainer>
+          {this.renderInputTextControlViaFormControl({
+            configProperty: "authentication.secretAccessKey",
+            label: "AWS Secret Access Key",
+            placeholderText: "Secret Access Key",
+            dataType: "TEXT",
+            encrypted: true,
+            isRequired: false,
+          })}
+        </FormInputContainer>
+        <FormInputContainer>
+          {this.renderInputTextControlViaFormControl({
+            configProperty: "authentication.sessionToken",
+            label: "AWS Session Token",
+            placeholderText: "Session Token",
+            dataType: "TEXT",
+            encrypted: true,
+            isRequired: false,
+          })}
+        </FormInputContainer>
+        <FormInputContainer>
+          {this.renderInputTextControlViaFormControl({
+            configProperty: "authentication.service",
+            label: "AWS Service",
+            placeholderText: "Service",
+            dataType: "TEXT",
+            encrypted: false,
+            isRequired: false,
+          })}
+        </FormInputContainer>
+        <FormInputContainer>
+          {this.renderInputTextControlViaFormControl({
+            configProperty: "authentication.region",
+            label: "AWS Region",
+            placeholderText: "Region",
+            dataType: "TEXT",
+            encrypted: false,
+            isRequired: false,
+          })}
+        </FormInputContainer>
+      </>
     );
   };
 
@@ -547,13 +770,10 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
   };
 
   renderOauth2 = () => {
-    const authentication = this.props.formData.authentication as
-      | ClientCredentials
-      | AuthorizationCode
-      | undefined;
+    const { authentication } = this.props.formData;
     if (!authentication) return;
     let content;
-    switch (authentication.grantType) {
+    switch (_.get(authentication, "grantType")) {
       case GrantType.AuthorizationCode:
         content = this.renderOauth2AuthorizationCode();
         break;
@@ -577,7 +797,7 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
                 value: GrantType.AuthorizationCode,
               },
             ],
-            "Grant type",
+            "Grant Type",
             "",
             false,
             "",
@@ -619,7 +839,7 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
           >
             {this.renderInputTextControlViaFormControl({
               configProperty: "authentication.headerPrefix",
-              label: "Header prefix",
+              label: "Header Prefix",
               placeholderText: "eg: Bearer ",
               dataType: "TEXT",
               encrypted: false,
@@ -632,7 +852,7 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
         >
           {this.renderInputTextControlViaFormControl({
             configProperty: "authentication.accessTokenUrl",
-            label: "Access token URL",
+            label: "Access Token URL",
             placeholderText: "https://example.com/login/oauth/access_token",
             dataType: "TEXT",
             encrypted: false,
@@ -655,8 +875,8 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
         >
           {this.renderInputTextControlViaFormControl({
             configProperty: "authentication.clientSecret",
-            label: "Client secret",
-            placeholderText: "Client secret",
+            label: "Client Secret",
+            placeholderText: "Client Secret",
             dataType: "PASSWORD",
             encrypted: true,
             isRequired: false,
@@ -703,17 +923,12 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
     const isGrantTypeAuthorizationCode =
       _.get(authentication, "grantType") === GrantType.AuthorizationCode;
     const isAuthenticationTypeOAuth2 = authType === AuthType.OAuth2;
-    const isConnectSelfSigned = _.get(connection, "ssl.authTypeControl");
-
-    if (
-      !isAuthenticationTypeOAuth2 ||
-      !(isGrantTypeAuthorizationCode || isConnectSelfSigned)
-    )
-      return null;
+    const isConnectSelfSigned =
+      _.get(connection, "ssl.authType") === SSLType.SELF_SIGNED_CERTIFICATE;
 
     return (
       <Collapsible title="Advanced Settings">
-        {isGrantTypeAuthorizationCode && (
+        {isAuthenticationTypeOAuth2 && isGrantTypeAuthorizationCode && (
           <FormInputContainer
             data-replay-id={btoa("authentication.sendScopeWithRefreshToken")}
           >
@@ -736,7 +951,7 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
             )}
           </FormInputContainer>
         )}
-        {isGrantTypeAuthorizationCode && (
+        {isAuthenticationTypeOAuth2 && isGrantTypeAuthorizationCode && (
           <FormInputContainer
             data-replay-id={btoa(
               "authentication.refreshTokenClientCredentialsLocation",
@@ -761,7 +976,27 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
             )}
           </FormInputContainer>
         )}
-        {isConnectSelfSigned && (
+        <FormInputContainer data-replay-id={btoa("ssl")}>
+          {this.renderDropdownControlViaFormControl(
+            "connection.ssl.authType",
+            [
+              {
+                label: "No",
+                value: "DEFAULT",
+              },
+              {
+                label: "Yes",
+                value: "SELF_SIGNED_CERTIFICATE",
+              },
+            ],
+            "Use Self-signed certificate",
+            "",
+            true,
+            "",
+            "DEFAULT",
+          )}
+        </FormInputContainer>
+        {isAuthenticationTypeOAuth2 && isConnectSelfSigned && (
           <FormInputContainer data-replay-id={btoa("selfsignedcert")}>
             {this.renderCheckboxViaFormControl(
               "authentication.useSelfSignedCert",
@@ -863,15 +1098,15 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
   // All components in formControls must be rendered via FormControl.
   // FormControl is the common wrapper for all formcontrol components and contains common elements i.e. label, subtitle, helpertext
   renderInputTextControlViaFormControl({
-    configProperty,
-    dataType,
-    encrypted,
-    fieldValidator,
-    isRequired,
-    isSecretExistsPath,
-    label,
-    placeholderText,
-  }: {
+                                         configProperty,
+                                         dataType,
+                                         encrypted,
+                                         fieldValidator,
+                                         isRequired,
+                                         isSecretExistsPath,
+                                         label,
+                                         placeholderText,
+                                       }: {
     configProperty: string;
     label: string;
     placeholderText: string;
@@ -894,11 +1129,11 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
           label: label,
           conditionals: {},
           placeholderText: placeholderText,
-          formName: this.props.formName,
+          formName: DATASOURCE_REST_API_FORM,
           validator: fieldValidator,
           isSecretExistsPath,
         }}
-        formName={this.props.formName}
+        formName={DATASOURCE_REST_API_FORM}
         multipleConfig={[]}
       />
     );
@@ -927,13 +1162,13 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
       label: label,
       conditionals: {},
       placeholderText: placeholderText,
-      formName: this.props.formName,
+      formName: DATASOURCE_REST_API_FORM,
       initialValue: initialValue,
     };
     return (
       <FormControl
         config={config}
-        formName={this.props.formName}
+        formName={DATASOURCE_REST_API_FORM}
         multipleConfig={[]}
       />
     );
@@ -953,13 +1188,13 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
       placeholderText: placeholderText,
       label: label,
       conditionals: {},
-      formName: this.props.formName,
+      formName: DATASOURCE_REST_API_FORM,
       isRequired: isRequired,
     };
     return (
       <FormControl
         config={config}
-        formName={this.props.formName}
+        formName={DATASOURCE_REST_API_FORM}
         multipleConfig={[]}
       />
     );
@@ -981,13 +1216,13 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
       encrypted: encrypted,
       label: label,
       conditionals: {},
-      formName: this.props.formName,
+      formName: DATASOURCE_REST_API_FORM,
       isRequired: isRequired,
     };
     return (
       <FormControl
         config={config}
-        formName={this.props.formName}
+        formName={DATASOURCE_REST_API_FORM}
         multipleConfig={[]}
       />
     );
@@ -1010,23 +1245,38 @@ class DatasourceRestAPIEditor extends React.Component<Props> {
           label: label,
           conditionals: {},
           placeholderText: placeholderText,
-          formName: this.props.formName,
+          formName: DATASOURCE_REST_API_FORM,
         }}
-        formName={this.props.formName}
+        formName={DATASOURCE_REST_API_FORM}
       />
     );
   }
 }
 
 const mapStateToProps = (state: AppState, props: any) => {
-  const { datasource, formName } = props;
+  const datasource = state.entities.datasources.list.find(
+    (e) => e.id === props.datasourceId,
+  ) as Datasource;
+
+  // Debugger render flag
+  const showDebugger = showDebuggerFlag(state);
+
+  const plugin = getPlugin(state, datasource?.pluginId || "") || undefined;
+
   const hintMessages = datasource && datasource.messages;
 
   return {
     initialValues: datasourceToFormValues(datasource),
-    formMeta: getFormMeta(formName)(state),
+    datasource: datasource,
+    actions: state.entities.actions,
+    plugin,
+    formData: getFormValues(DATASOURCE_REST_API_FORM)(
+      state,
+    ) as ApiDatasourceForm,
+    formMeta: getFormMeta(DATASOURCE_REST_API_FORM)(state),
     messages: hintMessages,
     datasourceName: datasource?.name ?? "",
+    showDebugger,
   };
 };
 
@@ -1036,6 +1286,9 @@ const mapDispatchToProps = (dispatch: any) => {
       dispatch(updateReplayEntity(id, data, ENTITY_TYPE.DATASOURCE)),
     updateDatasource: (formData: any, onSuccess?: ReduxAction<unknown>) =>
       dispatch(updateDatasource(formData, onSuccess)),
+    deleteDatasource: (id: string) => {
+      dispatch(deleteDatasource({ id }));
+    },
     createDatasource: (formData: any, onSuccess?: ReduxAction<unknown>) =>
       dispatch(createDatasourceFromForm(formData, onSuccess)),
     toggleSaveActionFlag: (flag: boolean) =>

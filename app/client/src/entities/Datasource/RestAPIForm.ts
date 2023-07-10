@@ -6,6 +6,7 @@ export enum AuthType {
   basic = "basic",
   apiKey = "apiKey",
   bearerToken = "bearerToken",
+  awsV4 = "awsV4",
 }
 
 export enum SSLType {
@@ -28,7 +29,8 @@ export type Authentication =
   | AuthorizationCode
   | Basic
   | ApiKey
-  | BearerToken;
+  | BearerToken
+  | AwsSignatureV4;
 
 export interface Connection {
   ssl: SSL;
@@ -36,7 +38,6 @@ export interface Connection {
 
 export interface SSL {
   authType: SSLType;
-  authTypeControl: boolean;
   certificateFile: Certificate;
 }
 
@@ -58,8 +59,6 @@ export interface ApiDatasourceForm {
   authType: AuthType;
   authentication?: Authentication;
   connection?: Connection;
-  userPermissions?: string[];
-  name?: string;
 }
 
 export interface Oauth2Common {
@@ -108,4 +107,13 @@ export interface ApiKey {
 export interface BearerToken {
   authenticationType: AuthType.bearerToken;
   bearerToken: string;
+}
+
+export interface AwsSignatureV4 {
+  authenticationType: AuthType.awsV4;
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken: string;
+  service: string;
+  region: string;
 }

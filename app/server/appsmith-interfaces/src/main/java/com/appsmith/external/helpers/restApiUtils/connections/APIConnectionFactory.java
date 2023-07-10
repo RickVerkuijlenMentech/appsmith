@@ -3,6 +3,7 @@ package com.appsmith.external.helpers.restApiUtils.connections;
 import com.appsmith.external.exceptions.pluginExceptions.AppsmithPluginError;
 import com.appsmith.external.exceptions.pluginExceptions.AppsmithPluginException;
 import com.appsmith.external.models.ApiKeyAuth;
+import com.appsmith.external.models.AwsSignatureV4Auth;
 import com.appsmith.external.models.AuthenticationDTO;
 import com.appsmith.external.models.BasicAuth;
 import com.appsmith.external.models.BearerTokenAuth;
@@ -32,6 +33,8 @@ public class APIConnectionFactory {
             return Mono.from(ApiKeyAuthentication.create((ApiKeyAuth) authentication));
         } else if (authentication instanceof BearerTokenAuth) {
             return Mono.from(BearerTokenAuthentication.create((BearerTokenAuth) authentication));
+        } else if (authentication instanceof AwsSignatureV4Auth) {
+            return Mono.from(AwsSignatureV4Authentication.create((AwsSignatureV4Auth) authentication));
         } else {
             return Mono.empty();
         }
